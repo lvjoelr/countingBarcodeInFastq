@@ -93,8 +93,9 @@ def main():
     print("\ncountBarcodeInFastq.py -b {} -s {} -d {} -r {} -c {} -p {} -n {}"\
           " {} {}".format(args.barcode_setting, args.insert_size,
                           args.direction, args.barcode_at_row,
-                          args.barcode_at_column, args.processes,
-                          args.fastq_gz, args.result, args.number_reads ))
+                          args.barcode_at_column, args.number_reads, 
+                          args.processes,  args.fastq_gz, args.result
+                          ))
     barcode_combination = read_barcode_list_excel(args.barcode_setting,
                                                   args.insert_size)
     print("\nBarcode Type(s): ".format(len(
