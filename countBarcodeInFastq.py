@@ -90,7 +90,7 @@ def main():
     parser.add_argument('-n', dest='number_reads', type=int, default=0,
                         help='number of reads for scanning')
     args = parser.parse_args()
-    print("\ncountBarcodeInFastq.py -b {} -s {} -d {} -r {} -c {} -p {} -n {}"\
+    print("\ncountBarcodeInFastq.py -b {} -s {} -d {} -r {} -c {} -n {} -p {}"\
           " {} {}".format(args.barcode_setting, args.insert_size,
                           args.direction, args.barcode_at_row,
                           args.barcode_at_column, args.number_reads, 
