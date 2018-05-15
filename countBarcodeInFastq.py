@@ -1,46 +1,133 @@
+# -*- coding: utf-8 -*-
+"""Scanning a fastq.gz to count DNA barcodes/tag defined in an Excel
+
+This module aims to count occurrence of prefined short DNA sequences
+(barcode/tag) and its combinations in a fastq.gz file from Next Generation
+Sequencing. 
+
+The input files include a .fastq.gz file and barcode sets in Excel file with
+specific format (-b). Other required arguments are library length (insert_size,
+-s), direction (-d, 0 - forward, 1 - backward, 2 - both), type of barcode being
+put at column in output file (-c), type of barcode being put at row (-r),
+number of processes (-p) and number of reads to be scanned (-n). 
+
+The output file is an Excel file with 4 sheets: summary, barcode_count,
+barcode_Read-Per-Million, and BarPlot. 
+
+"""
+
+__version__ = '0.1'
+__author__ = 'Jingqiao Lu, jingqiao.lv@gmail.com'
 
 import io
 import os
 import sys
 import gzip
 import argparse
+import openpyxl
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import multiprocessing as mp
 from functools import partial
 
+__author__ = 'Jingqiao Lu'
+
 def main():
+    """ Entry point of the module for commandline execution.
+
+    Output an excel file after receiving 9 arguments via argparse.
+
+    Args:
+        fastq   Fastq.gz file to be scanned, required
+        result  output Excel file with suffix .xlsx, required
+        barcode_setting Excel file containing barcodes information, 
+                        including position, name, type, id and 
+                        sequences, required
+        insert_size length of library, or DNA to be sequenced,
+                    required
+        direction    direction of library or DNA to be sequences, 
+                    required, 0=forward, 1=barkward, 2=both, default 0
+        barcode_at_column   barcode type appears at column in output
+                            valid when number of barcode type is 2. 
+                            default 'sample'
+        barcode_at_row      barcode type appears at row in output file,
+                            valid when number of barcode type is 2.
+                            default 'target'
+        processes   number of processes for multiprocessing, intger, 
+                    default 1
+        number_reads   number of reads for scanning
+   output:
+        An Excel file of name specified by argument 'result'.
+        The output contains 4 sheets:
+            summary:        numer of reads scanned, and reads with barcode
+            barcode_count:  count of reads with barcode combinations
+            barcode_Read-Per-Million:   normalization of counts within sample
+            BarPlot:    barplot of barcode counts and RPM
+    """
     parser = argparse.ArgumentParser(
         description='Scanning a gzipped fastq to count barcodes '\
         'provided in an Excel file' )
-    parser.add_argument('fastq', help='input fastq.gz')
-    parser.add_argument('result', help='result file')
+    parser.add_argument('fastq_gz', help='input gzipped fastq (fastq.gz)')
+    parser.add_argument('result', help='result excel file (.xlsx)')
     parser.add_argument('-b', dest='barcode_setting', required=True,
-                        help='barcode setting in excel')
-    parser.add_argument('-p', dest='processes', help='processes number',
-                        type=int)
-    parser.add_argument('-s', dest='insert_size', help='library insert size',
-                        type=int, required=True)
-    parser.add_argument('-d', dest='direction', type=int,
-                        required=True, help='library direction: '\
-                        '{0 forward 1 backward 2 both}')
+                        help='barcode setting in excel (.xlsx)')
+    parser.add_argument('-s', dest='insert_size', default=100, type=int, 
+                        help='library insert size, default: 100',
+                        )
+    parser.add_argument('-d', dest='direction', type=int, default=0,
+                        help='library direction: '\
+                        '{0 forward 1 backward 2 both}, default: 0')
+    parser.add_argument('-c', dest='barcode_at_column', default='sample', 
+                        help='barcode type at column in output file, default: '\
+                        'sample')
+    parser.add_argument('-r', dest='barcode_at_row', default='target', 
+                        help='barcode type at row in output file, default: '\
+                       'target')
+    parser.add_argument('-p', dest='processes', 
+                        help='processes number, default: 1', 
+                        type=int, default=1)
+    parser.add_argument('-n', dest='number_reads', type=int, default=0,
+                        help='number of reads for scanning')
     args = parser.parse_args()
+    print("\ncountBarcodeInFastq.py -b {} -s {} -d {} -r {} -c {} -p {} -n {}"\
+          " {} {}".format(args.barcode_setting, args.insert_size,
+                          args.direction, args.barcode_at_row,
+                          args.barcode_at_column, args.processes,
+                          args.fastq_gz, args.result, args.number_reads ))
     barcode_combination = read_barcode_list_excel(args.barcode_setting,
                                                   args.insert_size)
-    result = count_barcode_in_fastq(args.fastq, barcode_combination,
+    print("\nBarcode Type(s): ".format(len(
+          barcode_combination.barcode_combination_types())))
+    [print(" {:>15}: {:3} - {:3}  {}  {}".format(bs._barcode_set_name,
+                                      bs._start_position+1,
+                                      bs._end_position,
+                                      bs._barcode_type,
+                                      len(bs._barcode_sequences)
+                                      )) for bs in 
+         barcode_combination._barcode_sets]
+    print("Barcode Combinations: {}".format(len(
+          barcode_combination.barcode_combination_labels()))) 
+    result = count_barcode_in_fastq(args.fastq_gz, barcode_combination,
                                     identify_barcode_in_read, args.direction,
-                                    args.processes)
-    result = barcode_count_result_rearrange(result)
+                                    args.processes, args.number_reads)
+    result = barcode_count_result_rearrange(result, args.barcode_at_column,
+                                            args.barcode_at_row)
     print("Reads scanned: {}".format(result["total_reads"]))
     print("Reads with barcodes: {}".format(result["reads_identified"]))
-    df = result['barcode_counts']
-    print(df)
-    writer = pd.ExcelWriter(args.result)
-    df.to_excel(writer, index=False)
-    writer.save()
+    report_result_in_excel(result, args.result)
 
 
 def read_barcode_list_excel(barcode_excel, insert_size=100):
+    """Read barcode information from Excel file and return a BarcodeCombination
+
+    Args:
+        barcode_excel   an Excel file containing barcode information
+        insert_size     the length of DNA to be sequenced
+
+    Return:
+        A BarcodeCombination object
+    """
     barcode_dfs = pd.read_excel(barcode_excel, None)
     df_barcode_setting = barcode_dfs['barcode_position']
     barcode_sets = []
@@ -51,14 +138,14 @@ def read_barcode_list_excel(barcode_excel, insert_size=100):
         bs = None
         bs = BarcodeSet(barcode_set_name, int(row["start"]),
                         int(row["end"]), row["barcode_type"],                                           insert_size)
-        for bcIdx, barcode_row in barcode_dfs[barcode_set_name].iterrows(): 
+        for _, barcode_row in barcode_dfs[barcode_set_name].iterrows(): 
             bs.add(barcode_row['barcode_id'], barcode_row['barcode_sequence'])
         barcode_sets.append(bs)
     barcode_sets.sort(key=lambda x: x.start_position())
     return BarcodeCombination(barcode_sets)
 
 def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
-                           direction=0, processes=1):
+                           direction=0, processes=1, number_reads=0):
 
     reads, results, barcode_counts = [], [], []
     read_count = 0
@@ -77,7 +164,7 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
         return result
 
     with io.BufferedReader(gzip.open(fastq_gz, 'rb')) as f:
-        print("\n" + "Counting barcodes in "\
+        print("Counting barcodes in "\
               "{}...".format(os.path.basename(fastq_gz))) 
         line_count, read_count = 0, 0
         for line in f:
@@ -93,10 +180,11 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
                 reads = []
                 results= []
                 print('.', end='', flush=True)
-
             if len(barcode_counts) == 5:
                 barcode_counts = [np.apply_along_axis(sum, 0, 
                           np.array(barcode_counts))]
+            if number_reads>0 and read_count>=number_reads:
+                break
     if reads:
         result = count_barcode_in_reads(reads, processes, iden)
         results.extend(result)
@@ -109,20 +197,75 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
             'barcode_types': barcode_combination.barcode_combination_types(),
             'barcode_labels': barcode_combination.barcode_combination_labels()}
 
-def barcode_count_result_rearrange(barcode_count_result):
-    df = pd.DataFrame([barcode + [count] for barcode, count in 
-             zip(barcode_count_result['barcode_labels'],
-                 barcode_count_result['barcode_counts'])])
+def barcode_count_result_rearrange(barcode_count_result, barcode_at_column,
+                                   barcode_at_row):
+    df = pd.DataFrame(barcode_count_result['barcode_labels'])
+    #barcode_type_at_column, barcode_type_at_row = None, None
+    barcode_type_list = []
     for key, val in barcode_count_result['barcode_types'].items():
+        barcode_type_list.append(key)
         df[key] = df.iloc[:,val[0]]
         for barcode_order, pos in enumerate(val):
             if len(val) > 1:
                 df[key] = df[key] + '_' + df.iloc[:,pos]
-    df['count'] = df.iloc[:,len(barcode_count_result['barcode_labels'][0])]
+  
+    df['count'] = barcode_count_result['barcode_counts']
+    df =  df[list(barcode_count_result['barcode_types'].keys()) + ['count']]
+
+    df_dimension = 1
+    if len(barcode_type_list) == 2:
+        df = df.pivot_table(index=barcode_at_row, columns=barcode_at_column,
+                            values='count')
+        df_dimension = 2
+
     return {'total_reads': barcode_count_result['total_reads'],
-            'barcode_counts': df[list(barcode_count_result['barcode_types'].keys()) + ['count']],
-            'reads_identified': df['count'].sum()
+            'barcode_counts': df,
+            'reads_identified': barcode_count_result['barcode_counts'].sum(),
+            'result_dimension': df_dimension
             }
+
+def report_result_in_excel(rearranged_result, output_file):
+    writer = pd.ExcelWriter(output_file)
+    df_summary = pd.DataFrame([(rearranged_result['total_reads']),
+                               (rearranged_result['reads_identified'])],
+                              columns=['count'], index=['total_reads',
+                                                      'reads_identified'])
+    df_summary.to_excel(writer, 'summary')
+    df = rearranged_result['barcode_counts']
+    df.to_excel(writer, 'barcodes_counts',
+                index=rearranged_result['result_dimension']==2)
+    if rearranged_result['result_dimension'] == 1:
+        df['RPM'] = df['count'] * 10**6 / df['count'].sum()
+        df.to_excel(writer, 'barcodes_Read-Per-Million', index=False)
+        two_bar_plots(df['RPM'], df['count'], output_file+'.png')
+    else:
+        df_rpm = df * 10**6 / df.sum(axis=0)
+        df_rpm = df_rpm.fillna(0)
+        df_rpm.to_excel(writer, 'barcodes_Read-Per-Million')
+        #df_rpm.transpose().plot(kind='bar')#, ylim=(0, df_rpm.max().max()*10))
+        two_bar_plots(df.transpose(), df_rpm.transpose(), output_file+'.png')
+    writer.save()
+    wb = openpyxl.load_workbook(output_file)
+    ws = wb.create_sheet('BarPlot')
+    img = openpyxl.drawing.image.Image(output_file+'.png')
+    img.anchor(ws.cell(row=2, column=2))
+    ws.add_image(img)
+    wb.save(output_file)
+    os.remove(output_file+'.png')
+    print("Writing result into '{}'.\n".format(output_file))
+
+def two_bar_plots(count_object, rpm_object, image_name):
+    fig, (ax1, ax2) = plt.subplots(2, sharex=True)
+    fig.subplots_adjust(hspace=0)
+    rpm_object.plot(kind='bar', ax=ax1)
+    count_object.plot(kind='bar', ax=ax2).invert_yaxis()
+    ax2.set_ylabel("Read Count")
+    ax1.set_ylabel("Read Per Million")
+    ax1.set_yscale("log", nonposy='clip')
+    ax2.set_yscale("log", nonposy='clip')
+    ax1.set_title("Barcode Counts Barplot")
+    plt.savefig(image_name)
+
 
 def identify_barcode_in_read(read, barcode_combination, direction=0):
     """Identify occurence of barcode in a DNA sequence (read)
@@ -227,6 +370,7 @@ class BarcodeCombination:
               barcode_sets]
         self._reverse_barcode_combination_in_number = np.array(combinations(
               [x.reverse_barcode_in_number() for x in barcode_sets ]))
+        self._barcode_sets = barcode_sets
 
     def list2dict(self, l):
         my_dict = {}
