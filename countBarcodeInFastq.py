@@ -110,8 +110,8 @@ def main():
     print("Barcode Combinations: {}".format(len(
           barcode_combination.barcode_combination_labels()))) 
     result = count_barcode_in_fastq(args.fastq_gz, barcode_combination,
-                                    identify_barcode_in_read, args.direction,
-                                    args.processes, args.number_reads)
+                                    identify_barcode_in_read, args.insert_size,                                     args.direction, args.processes, 
+                                    args.number_reads)
     result = barcode_count_result_rearrange(result, args.barcode_at_column,
                                             args.barcode_at_row)
     print("Reads scanned: {}".format(result["total_reads"]))
@@ -145,7 +145,7 @@ def read_barcode_list_excel(barcode_excel, insert_size=100):
     barcode_sets.sort(key=lambda x: x.start_position())
     return BarcodeCombination(barcode_sets)
 
-def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
+def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc, insert_size,
                            direction=0, processes=1, number_reads=0):
 
     reads, results, barcode_counts = [], [], []
@@ -162,6 +162,7 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
             pool.join()
         else:
             result = [iden(read) for read in reads]
+        result = np.apply_along_axis(sum, 0,                                                             np.array(result))
         return result
 
     with io.BufferedReader(gzip.open(fastq_gz, 'rb')) as f:
@@ -172,14 +173,17 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc,
             line_count +=1
             if line_count % 4 != 2:  # skip non sequence line
                 continue
+            if len(line) <= insert_size:
+                continue
             reads.append(line.decode()[:-1]) # add sequence into reads list
             read_count += 1
-            if read_count % 100000 == 0:
+            if read_count % 10000 == 0:
                 result = count_barcode_in_reads(reads, processes, iden)
-                results.extend(result)
+                results.append(result)
                 barcode_counts.append(np.apply_along_axis(sum, 0,                                                             np.array(results)))
                 reads = []
                 results= []
+                result = []
                 print('.', end='', flush=True)
             if len(barcode_counts) == 5:
                 barcode_counts = [np.apply_along_axis(sum, 0, 
@@ -207,7 +211,7 @@ def barcode_count_result_rearrange(barcode_count_result, barcode_at_column,
         barcode_type_list.append(key)
         df[key] = df.iloc[:,val[0]]
         for barcode_order, pos in enumerate(val):
-            if len(val) > 1:
+            if barcode_order > 0:
                 df[key] = df[key] + '_' + df.iloc[:,pos]
   
     df['count'] = barcode_count_result['barcode_counts']
@@ -279,8 +283,8 @@ def identify_barcode_in_read(read, barcode_combination, direction=0):
     """
 
     # Get barcode information from BarcodeCombination Object
-    barcode_positions = barcode_combination.barcode_combination_positions()
-    barcode_combinations = barcode_combination.barcode_combination_in_number() 
+    barcode_positions = barcode_combination._barcode_combination_positions
+    barcode_combinations = barcode_combination._barcode_combination_in_number 
 
     # Retrieve sequence from read at barcode positions
     sequences_at_barcode_positions = [ pattern_to_number(read[pos[0]:pos[1]])
@@ -294,12 +298,12 @@ def identify_barcode_in_read(read, barcode_combination, direction=0):
         return occurrence
     
     # Get reverse barcode information from BarcodeCombination Object
-    reverse_barcode_positions = barcode_combination.reverse_barcode_combination_positions()
-    reverse_barcode_combinations = barcode_combination.reverse_barcode_combination_in_number()
+    reverse_barcode_positions = barcode_combination._reverse_barcode_combination_positions
+    reverse_barcode_combinations = barcode_combination._reverse_barcode_combination_in_number
 
     # Identify occurrence of barcode in read at reverse direction
-    sequences_at_reverse_barcode_positions = [pattern_to_number(
-          read[pos[0]:pos[1]]) for pos in
+    sequences_at_reverse_barcode_positions = [
+          pattern_to_number(read[pos[0]:pos[1]]) for pos in
           reverse_barcode_positions  ]
     reverse_occurrence = np.apply_along_axis(
           lambda x: np.array_equal(x, 
@@ -369,6 +373,8 @@ class BarcodeCombination:
         self._reverse_barcode_combination_positions =[
               (x.reverse_start_position(), x.reverse_end_position()) for x in
               barcode_sets]
+        self._reverse_barcode_combination_sequences = np.array(combinations(
+              [x.reverse_barcode_sequences() for x in barcode_sets]))
         self._reverse_barcode_combination_in_number = np.array(combinations(
               [x.reverse_barcode_in_number() for x in barcode_sets ]))
         self._barcode_sets = barcode_sets
@@ -387,6 +393,9 @@ class BarcodeCombination:
 
     def barcode_combination_sequences(self):
         return self._barcode_combination_sequences
+
+    def reverse_barcode_combination_sequences(self):
+        return self._reverse_barcode_combination_sequences
 
     def barcode_combination_in_number(self):
         return self._barcode_combination_in_number
@@ -435,6 +444,7 @@ class BarcodeSet:
         self._reverse_start_position = insert_size - end_position
         self._reverse_end_position = insert_size - (start_position-1)
         self._barcode_sequences = []
+        self._reverse_barcode_sequences = []
         self._barcode_labels = []
         self._barcode_in_number = []
         self._reverse_barcode_in_number = []
@@ -453,6 +463,7 @@ class BarcodeSet:
                                                           self._barcode_length))
 
         self._barcode_sequences.append(barcode_sequence)
+        self._reverse_barcode_sequences.append(reverse_complement(barcode_sequence))
         self._barcode_labels.append(barcode_label)
         self._barcode_in_number.append(pattern_to_number(barcode_sequence))
         self._reverse_barcode_in_number.append(
@@ -484,6 +495,9 @@ class BarcodeSet:
 
     def barcode_sequences(self):
         return self._barcode_sequences
+
+    def reverse_barcode_sequences(self):
+        return self._reverse_barcode_sequences
 
     def barcode_in_number(self):
         return self._barcode_in_number
