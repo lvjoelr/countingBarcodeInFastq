@@ -57,6 +57,7 @@ def main():
         processes   number of processes for multiprocessing, intger, 
                     default 1
         number_reads   number of reads for scanning
+        plot	generate a barplot 0=False 1=True, default 0
    output:
         An Excel file of name specified by argument 'result'.
         The output contains 4 sheets:
@@ -72,7 +73,7 @@ def main():
     parser.add_argument('result', help='result excel file (.xlsx)')
     parser.add_argument('-b', dest='barcode_setting', required=True,
                         help='barcode setting in excel (.xlsx)')
-    parser.add_argument('-s', dest='insert_size', default=100, type=int, 
+    parser.add_argument('-s', dest='insert_size', required=True, type=int, 
                         help='library insert size, default: 100',
                         )
     parser.add_argument('-d', dest='direction', type=int, default=0,
@@ -89,12 +90,15 @@ def main():
                         type=int, default=1)
     parser.add_argument('-n', dest='number_reads', type=int, default=0,
                         help='number of reads for scanning')
+    parser.add_argument('-f', dest='plot_bar', type=int, default=0, 
+                        help='draw a barplot')
     args = parser.parse_args()
     print("\ncountBarcodeInFastq.py -b {} -s {} -d {} -r {} -c {} -n {} -p {}"\
-          " {} {}".format(args.barcode_setting, args.insert_size,
+          " -f {}  {} {}".format(args.barcode_setting, args.insert_size,
                           args.direction, args.barcode_at_row,
                           args.barcode_at_column, args.number_reads, 
-                          args.processes,  args.fastq_gz, args.result
+                          args.processes, args.plot_bar, args.fastq_gz, 
+                          args.result
                           ))
     barcode_combination = read_barcode_list_excel(args.barcode_setting,
                                                   args.insert_size)
@@ -110,13 +114,14 @@ def main():
     print("Barcode Combinations: {}".format(len(
           barcode_combination.barcode_combination_labels()))) 
     result = count_barcode_in_fastq(args.fastq_gz, barcode_combination,
-                                    identify_barcode_in_read, args.insert_size,                                     args.direction, args.processes, 
-                                    args.number_reads)
+                                    identify_barcode_in_read, args.insert_size,
+                                    args.direction, args.processes,
+                                    args.number_reads) 
     result = barcode_count_result_rearrange(result, args.barcode_at_column,
                                             args.barcode_at_row)
     print("Reads scanned: {}".format(result["total_reads"]))
     print("Reads with barcodes: {}".format(result["reads_identified"]))
-    report_result_in_excel(result, args.result)
+    report_result_in_excel(result, args.result, args.plot_bar)
 
 
 def read_barcode_list_excel(barcode_excel, insert_size=100):
@@ -145,8 +150,10 @@ def read_barcode_list_excel(barcode_excel, insert_size=100):
     barcode_sets.sort(key=lambda x: x.start_position())
     return BarcodeCombination(barcode_sets)
 
+
 def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc, insert_size,
                            direction=0, processes=1, number_reads=0):
+
 
     reads, results, barcode_counts = [], [], []
     read_count = 0
@@ -168,15 +175,19 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc, insert_size,
     with io.BufferedReader(gzip.open(fastq_gz, 'rb')) as f:
         print("Counting barcodes in "\
               "{}...".format(os.path.basename(fastq_gz))) 
-        line_count, read_count = 0, 0
+        line_count, read_count, short_reads = 0, 0, 0
         for line in f:
-            line_count +=1
+            if number_reads>0 and read_count>=number_reads:
+                break
+            line_count += 1
             if line_count % 4 != 2:  # skip non sequence line
                 continue
-            if len(line) <= insert_size:
+            read_count += 1
+            if len(line) <= insert_size: # skip short reads
+                short_reads += 1
                 continue
             reads.append(line.decode()[:-1]) # add sequence into reads list
-            read_count += 1
+            
             if read_count % 10000 == 0:
                 result = count_barcode_in_reads(reads, processes, iden)
                 results.append(result)
@@ -188,16 +199,15 @@ def count_barcode_in_fastq(fastq_gz, barcode_combination, idenfunc, insert_size,
             if len(barcode_counts) == 5:
                 barcode_counts = [np.apply_along_axis(sum, 0, 
                           np.array(barcode_counts))]
-            if number_reads>0 and read_count>=number_reads:
-                break
     if reads:
         result = count_barcode_in_reads(reads, processes, iden)
-        results.extend(result)
+        results.append(result)
         barcode_counts.append(np.apply_along_axis(sum, 0, np.array(results)))
         print('.', end='', flush=True)
     print()
     barcode_counts = np.apply_along_axis(sum, 0, np.array(barcode_counts))
     return {'total_reads': read_count,
+            'short_reads': short_reads,
             'barcode_counts': barcode_counts, 
             'barcode_types': barcode_combination.barcode_combination_types(),
             'barcode_labels': barcode_combination.barcode_combination_labels()}
@@ -224,16 +234,19 @@ def barcode_count_result_rearrange(barcode_count_result, barcode_at_column,
         df_dimension = 2
 
     return {'total_reads': barcode_count_result['total_reads'],
+            'short_reads': barcode_count_result['short_reads'],
             'barcode_counts': df,
             'reads_identified': barcode_count_result['barcode_counts'].sum(),
             'result_dimension': df_dimension
             }
 
-def report_result_in_excel(rearranged_result, output_file):
+def report_result_in_excel(rearranged_result, output_file, plot_bar=0):
     writer = pd.ExcelWriter(output_file)
     df_summary = pd.DataFrame([(rearranged_result['total_reads']),
+                               (rearranged_result['short_reads']),
                                (rearranged_result['reads_identified'])],
                               columns=['count'], index=['total_reads',
+                                                        'short_reads',
                                                       'reads_identified'])
     df_summary.to_excel(writer, 'summary')
     df = rearranged_result['barcode_counts']
@@ -248,15 +261,19 @@ def report_result_in_excel(rearranged_result, output_file):
         df_rpm = df_rpm.fillna(0)
         df_rpm.to_excel(writer, 'barcodes_Read-Per-Million')
         #df_rpm.transpose().plot(kind='bar')#, ylim=(0, df_rpm.max().max()*10))
-        two_bar_plots(df.transpose(), df_rpm.transpose(), output_file+'.png')
+        if plot_bar:
+            two_bar_plots(df.transpose(), df_rpm.transpose(), output_file+'.png')
     writer.save()
     wb = openpyxl.load_workbook(output_file)
-    ws = wb.create_sheet('BarPlot')
-    img = openpyxl.drawing.image.Image(output_file+'.png')
-    img.anchor(ws.cell(row=2, column=2))
-    ws.add_image(img)
-    wb.save(output_file)
-    os.remove(output_file+'.png')
+    if plot_bar:
+        ws = wb.create_sheet('BarPlot')
+        img = openpyxl.drawing.image.Image(output_file+'.png')
+        img.anchor(ws.cell(row=2, column=2))
+        ws.add_image(img)
+        wb.save(output_file)
+        os.remove(output_file+'.png')
+    else:
+        wb.save(output_file)
     print("Writing result into '{}'.\n".format(output_file))
 
 def two_bar_plots(count_object, rpm_object, image_name):
@@ -270,6 +287,18 @@ def two_bar_plots(count_object, rpm_object, image_name):
     ax2.set_yscale("log", nonposy='clip')
     ax1.set_title("Barcode Counts Barplot")
     plt.savefig(image_name)
+
+def identify_barcode_in_read_with_barcode_sets(read, barcode_sets):
+    result = np.zeros([len(barcode_set) for barcode_set in barcode_sets])
+    result_idx = [-1] *len(read)
+    for i, nt in enumerate(read):
+        for idx, barcode in enumerate(barcode_sets[i]):
+            if nt == barcode:
+                result_idx[i] = idx
+                break
+    if min(result_idx)>=0:
+        result[tuple(result_idx)] = 1
+    return result.reshape(result.size)
 
 
 def identify_barcode_in_read(read, barcode_combination, direction=0):
@@ -289,26 +318,40 @@ def identify_barcode_in_read(read, barcode_combination, direction=0):
     # Retrieve sequence from read at barcode positions
     sequences_at_barcode_positions = [ pattern_to_number(read[pos[0]:pos[1]])
                                       for pos in barcode_positions ]
+    sequences_at_barcode_positions = [ read[pos[0]:pos[1]]
+                                      for pos in barcode_positions ]
+    barcode_sets = [bs._barcode_sequences for bs in
+                    barcode_combination._barcode_sets]
+
     # Check occurrence with np.array_qual and np.apply_along_axis
-    occurrence = np.apply_along_axis(
-          lambda x: np.array_equal(x, 
-                                    np.array(sequences_at_barcode_positions)),
-                 1, barcode_combinations) + 0
+    #occurrence = np.apply_along_axis(
+    #      lambda x: np.array_equal(x, 
+    #                                np.array(sequences_at_barcode_positions)),
+    #             1, barcode_combinations) + 0
+    occurrence = identify_barcode_in_read_with_barcode_sets(
+        sequences_at_barcode_positions, barcode_sets)
     if direction == 0:  
         return occurrence
     
     # Get reverse barcode information from BarcodeCombination Object
     reverse_barcode_positions = barcode_combination._reverse_barcode_combination_positions
     reverse_barcode_combinations = barcode_combination._reverse_barcode_combination_in_number
+    reverse_barcode_sets = [bs._reverse_barcode_sequences for bs in
+                    barcode_combination._barcode_sets]
 
     # Identify occurrence of barcode in read at reverse direction
     sequences_at_reverse_barcode_positions = [
           pattern_to_number(read[pos[0]:pos[1]]) for pos in
           reverse_barcode_positions  ]
-    reverse_occurrence = np.apply_along_axis(
-          lambda x: np.array_equal(x, 
-                 np.array(sequences_at_reverse_barcode_positions)), 1, 
-                 reverse_barcode_combinations) +0
+    sequences_at_reverse_barcode_positions = [ read[pos[0]:pos[1]] for pos in 
+          reverse_barcode_positions ]
+    #reverse_occurrence = np.apply_along_axis(
+    #      lambda x: np.array_equal(x, 
+    #             np.array(sequences_at_reverse_barcode_positions)), 1, 
+    #             reverse_barcode_combinations) +0
+    reverse_occurrence = identify_barcode_in_read_with_barcode_sets(
+        sequences_at_reverse_barcode_positions, reverse_barcode_sets)
+
     if direction == 1:
         return reverse_occurrence
     elif direction == 2:
